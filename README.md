@@ -3,7 +3,7 @@
 
 ## Project Overview
 
-This project aims to develop a machine learning framework for prioritizing CFTR variants using ClinVar data. The long-term objective is to integrate variant prioritization with Whole Exome Sequencing (WXS) workflows for rare disease analysis.
+This project aims to develop an interpretable machine learning framework for prioritizing disease-causing genetic variants using ClinVar knowledge integration and Whole Exome Sequencing (WES/WXS) data. The initial focus is on the CFTR gene as a proof-of-concept case study for rare disease variant prioritization.
 
 ## Current Progress
 
@@ -23,10 +23,30 @@ CFTR
 Number of CFTR Variants:
 12421
 
-## Next Steps
+Assembly: GRCh38
 
-- Data preprocessing
-- Label generation
-- Feature engineering
-- Machine learning model development
-- Explainable AI analysis
+## Clinical Labels Retained:
+
+Pathogenic
+Likely pathogenic
+Benign
+Likely benign
+Repository Structure
+scripts/
+    cftr_preprocessing.R
+
+results/
+    cftr_variant_count.txt
+    clinical_significance_summary.csv
+
+## Next Steps
+Create machine-learning-ready labels
+Perform exploratory data analysis
+Engineer predictive features
+Train baseline machine learning models
+Evaluate classification performance
+Implement explainable AI techniques
+Extend framework toward WES variant prioritization
+
+## Long-Term Goal
+Develop an explainable machine learning framework for prioritizing disease-causing variants from Whole Exome Sequencing data using ClinVar knowledge integration for rare disease diagnosis.
