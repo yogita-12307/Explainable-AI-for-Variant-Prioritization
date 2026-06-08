@@ -78,3 +78,11 @@ write.csv(
   "results/cftr_clean_dataset.csv",
   row.names = FALSE
 )
+
+# Creates binary labels
+cftr_clean$labels <- ifelse(
+  cftr_clean$ClinicalSignificance %in% c("Pathogenic", "Likely pathogenic" ),
+  1,0
+)
+
+table(cftr_clean$labels)
