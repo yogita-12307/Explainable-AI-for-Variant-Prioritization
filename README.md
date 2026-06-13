@@ -25,28 +25,59 @@ Number of CFTR Variants:
 
 Assembly: GRCh38
 
-## Clinical Labels Retained:
+## Clinical Labels Retained
 
-Pathogenic
-Likely pathogenic
-Benign
-Likely benign
-Repository Structure
+- Pathogenic
+- Likely pathogenic
+- Benign
+- Likely benign
+
+## Feature Engineering
+
+Selected machine learning features:
+
+- Type
+- OriginSimple
+- ReviewStatus
+- NumberSubmitters
+
+Generated binary labels:
+
+- 1 = Pathogenic + Likely pathogenic
+- 0 = Benign + Likely benign
+
+Dataset Summary:
+
+- Total CFTR variants: 12,421
+- GRCh38 CFTR variants: 6,094
+- High-confidence variants: 2,800
+- Pathogenic class: 1,212
+- Benign class: 1,588
+
+## Repository Structure
+
 scripts/
     cftr_preprocessing.R
 
 results/
     cftr_variant_count.txt
+    cftr_clean_variant_count.txt
     clinical_significance_summary.csv
+    cftr_ml_dataset.csv
 
 ## Next Steps
-Create machine-learning-ready labels
-Perform exploratory data analysis
-Engineer predictive features
-Train baseline machine learning models
-Evaluate classification performance
+
+- Split dataset into training and testing sets
+- Train Random Forest classifier
+- Evaluate model performance
+- Perform feature importance analysis
+- Implement explainable AI methods
+- Integrate WES-derived variants for prioritization
+
+## Long-Term Goal
+
+Develop an explainable machine learning framework for prioritizing disease-causing variants from Whole Exome Sequencing (WES) data through integration of ClinVar clinical knowledge, variant annotation, and interpretable machine learning models.
 Implement explainable AI techniques
 Extend framework toward WES variant prioritization
 
-## Long-Term Goal
 Develop an explainable machine learning framework for prioritizing disease-causing variants from Whole Exome Sequencing data using ClinVar knowledge integration for rare disease diagnosis.
