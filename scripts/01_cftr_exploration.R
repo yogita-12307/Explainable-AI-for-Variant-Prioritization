@@ -133,3 +133,82 @@ write.csv(
   "results/cftr_ml_dataset.csv",
   row.names = FALSE
 )
+
+# Split data into training and testing sets
+
+library(caret)
+
+set.seed(123)
+
+trainIndex <- createDataPartition(
+  ml_data$labels,
+  p = 0.8,
+  list = FALSE
+)
+
+train_data <- ml_data[trainIndex, ]
+test_data <- ml_data[-trainIndex, ]
+
+dim(train_data)
+dim(test_data)
+
+write.csv(
+  train_data,
+  "results/train_data.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  test_data,
+  "results/test_data.csv",
+  row.names = FALSE
+)
+
+# Train Random Forest classifier
+
+library(randomForest)
+
+rf_model <- randomForest(
+  labels ~ .,
+  data = train_data,
+  ntree = 500,
+  importance = TRUE
+)
+
+print(rf_model)
+
+# Generate predictions
+
+predictions <- predict(
+  rf_model,
+  test_data
+)
+
+# Evaluate model performance
+
+rf_results <- confusionMatrix(
+  predictions,
+  test_data$labels
+)
+
+print(rf_results)
+
+# Feature importance analysis
+
+importance(rf_model)
+
+varImpPlot(rf_model)
+
+# Save model
+
+saveRDS(
+  rf_model,
+  "results/cftr_random_forest_model.rds"
+)
+
+# Save evaluation results
+
+capture.output(
+  rf_results,
+  file = "results/random_forest_results.txt"
+)
