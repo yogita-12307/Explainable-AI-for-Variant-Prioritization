@@ -64,6 +64,19 @@ results/
     cftr_clean_variant_count.txt
     clinical_significance_summary.csv
     cftr_ml_dataset.csv
+    Random Forest Performance
+
+Accuracy: 84.79%
+Kappa: 0.6849
+Sensitivity: 92.11%
+Specificity: 75.21%
+OOB Error Rate: 14.23%
+
+Top Predictive Features:
+1. Type
+2. ReviewStatus
+3. NumberSubmitters
+4. OriginSimple
 
 ## Next Steps
 
