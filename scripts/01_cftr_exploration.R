@@ -1,200 +1,556 @@
+# ============================================================
+# CFTR PATHOGENICITY PROJECT
+# MODEL A vs MODEL B — CLEAN REBUILD
+# ============================================================
+
+# ------------------------------------------------------------
+# 0. Packages
+# ------------------------------------------------------------
+
 library(data.table)
 library(caret)
 library(randomForest)
 
-# 1) LOAD AND CLEAN CLINVAR DATA  (unchanged from your original)
 
-setwd("E:/Private")  # folder containing variant_summary.txt
 
-clinVar <- fread("variant_summary.txt")
+set.seed(123)
 
+# ------------------------------------------------------------
+# 1. Load / prepare original CFTR dataset
+# ------------------------------------------------------------
+
+# Start from the original ClinVar dataset
+
+setwd("E:/Private")
+clinVar <- fread("E:/Private/variant_summary.txt/variant_summary.txt")
 cftr <- clinVar[GeneSymbol == "CFTR"]
 
-cat("Total CFTR variants identified:", nrow(cftr), "\n")
-
-clinical_summary <- as.data.frame(table(cftr$ClinicalSignificance))
-print(clinical_summary)
-
-cftr <- cftr[Assembly == "GRCh38"]
-
-good_labels <- c("Pathogenic", "Likely pathogenic", "Benign", "Likely benign")
-cftr_clean <- cftr[ClinicalSignificance %in% good_labels]
-
-table(cftr_clean$ClinicalSignificance)
-table(cftr_clean$ReviewStatus)
-
-dir.create("results", showWarnings = FALSE)
-
-writeLines(
-  paste("Total CFTR variants identified:", nrow(cftr)),
-  "results/cftr_variant_count.txt"
-)
-write.csv(clinical_summary, "results/clinical_significance_summary.csv", row.names = FALSE)
-
-write.csv(cftr_clean, "results/cftr_clean_dataset.csv", row.names = FALSE)
-
-# Binary labels
-cftr_clean$labels <- ifelse(
-  cftr_clean$ClinicalSignificance %in% c("Pathogenic", "Likely pathogenic"),
-  1, 0
-)
-table(cftr_clean$labels)
-
-# 2) BASELINE MODEL — original 4 features
-#    (includes ClinVar curation-confidence metadata on purpose,
-#    this is the model we are checking FOR circularity)
-
-ml_data_baseline <- cftr_clean[, .(
-  Type, OriginSimple, ReviewStatus, NumberSubmitters, labels
-)]
-
-ml_data_baseline$Type         <- as.factor(ml_data_baseline$Type)
-ml_data_baseline$OriginSimple <- as.factor(ml_data_baseline$OriginSimple)
-ml_data_baseline$ReviewStatus <- as.factor(ml_data_baseline$ReviewStatus)
-ml_data_baseline$labels       <- as.factor(ml_data_baseline$labels)
-
-write.csv(ml_data_baseline, "results/cftr_ml_dataset_baseline.csv", row.names = FALSE)
-
-set.seed(123)
-trainIndex_base <- createDataPartition(ml_data_baseline$labels, p = 0.8, list = FALSE)
-train_base <- ml_data_baseline[trainIndex_base, ]
-test_base  <- ml_data_baseline[-trainIndex_base, ]
-
-rf_model_baseline <- randomForest(
-  labels ~ ., data = train_base, ntree = 500, importance = TRUE
-)
-print(rf_model_baseline)
-
-pred_base <- predict(rf_model_baseline, test_base)
-results_baseline <- confusionMatrix(pred_base, test_base$labels)
-print(results_baseline)
-
-saveRDS(rf_model_baseline, "results/cftr_rf_model_baseline.rds")
-capture.output(results_baseline, file = "results/random_forest_results_baseline.txt")
-
-# 3) ANNOTATE VARIANTS — gnomAD allele frequency + CADD score
-#    via myvariant.info (requires internet access)
-
-# install.packages("BiocManager")
-# BiocManager::install("myvariant")
-library(myvariant)
-
-# Build HGVS-style genomic query IDs from ClinVar's VCF-style columns.
-# NOTE: adjust column names below if your variant_summary.txt uses
-# different headers (ClinVar's standard columns are shown here:
-# Chromosome, Start, ReferenceAlleleVCF, AlternateAlleleVCF)
-cftr_clean$query_id <- paste0(
-  "chr", cftr_clean$Chromosome, ":g.",
-  cftr_clean$Start, cftr_clean$ReferenceAlleleVCF, ">", cftr_clean$AlternateAlleleVCF
-)
-
-# Query in batches to avoid timeouts/rate limits
-annotate_batch <- function(ids, batch_size = 200) {
-  results <- list()
-  for (i in seq(1, length(ids), by = batch_size)) {
-    batch <- ids[i:min(i + batch_size - 1, length(ids))]
-    res <- tryCatch(
-      getVariants(batch, fields = c("gnomad_genome.af.af", "cadd.phred")),
-      error = function(e) {
-        cat("Batch", i, "failed:", conditionMessage(e), "\n")
-        NULL
-      }
+# Keep only GRCh38 variants and the four target classifications
+cftr_clean <- cftr[
+  Assembly == "GRCh38" &
+    ClinicalSignificance %in% c(
+      "Pathogenic",
+      "Likely pathogenic",
+      "Benign",
+      "Likely benign"
     )
-    if (!is.null(res)) results[[length(results) + 1]] <- res
-  }
-  if (length(results) == 0) return(NULL)
-  rbindlist(results, fill = TRUE)
-}
+]
 
-annotations <- annotate_batch(cftr_clean$query_id)
-
-if (!is.null(annotations)) {
-  cftr_clean$gnomad_af   <- annotations$gnomad_genome.af.af[match(cftr_clean$query_id, annotations$query)]
-  cftr_clean$cadd_phred  <- annotations$cadd.phred[match(cftr_clean$query_id, annotations$query)]
-} else {
-  cat("Annotation failed — gnomad_af/cadd_phred will be NA. See fallback note below.\n")
-  cftr_clean$gnomad_af  <- NA
-  cftr_clean$cadd_phred <- NA
-}
-
-# Variants with no population frequency record are effectively absent
-# from gnomAD (i.e. not seen in large population cohorts) — treat NA as 0
-cftr_clean$gnomad_af[is.na(cftr_clean$gnomad_af)] <- 0
-
-write.csv(cftr_clean, "results/cftr_annotated_dataset.csv", row.names = FALSE)
-
-cat("Variants missing CADD score:", sum(is.na(cftr_clean$cadd_phred)), "of", nrow(cftr_clean), "\n")
-
-# 4) BIOLOGICAL MODEL — no ClinVar curation-confidence features
-#    This is the direct test of the original project goal:
-#    "identify pathogenicity from the variant's own features,
-#    not because ClinVar already flagged it with high confidence"
-
-cftr_bio <- cftr_clean[!is.na(cadd_phred)]  # drop rows with no CADD score
-
-ml_data_bio <- cftr_bio[, .(
-  Type, OriginSimple, gnomad_af, cadd_phred, labels
+# Create binary outcome:
+# 1 = pathogenic / likely pathogenic
+# 0 = benign / likely benign
+cftr_clean[, labels := ifelse(
+  ClinicalSignificance %in% c(
+    "Pathogenic",
+    "Likely pathogenic"
+  ),
+  1,
+  0
 )]
 
-ml_data_bio$Type         <- as.factor(ml_data_bio$Type)
-ml_data_bio$OriginSimple <- as.factor(ml_data_bio$OriginSimple)
-ml_data_bio$labels       <- as.factor(ml_data_bio$labels)
+# Make outcome a factor for caret
+cftr_clean[, labels_factor := factor(
+  labels,
+  levels = c(0, 1),
+  labels = c("Benign", "Pathogenic")
+)]
 
-write.csv(ml_data_bio, "results/cftr_ml_dataset_biological.csv", row.names = FALSE)
+cat("\n================ DATASET =================\n")
+cat("Number of variants:", nrow(cftr_clean), "\n")
+print(table(cftr_clean$labels_factor))
+
+
+# ------------------------------------------------------------
+# 2. Create ONE train/test split
+# ------------------------------------------------------------
+# IMPORTANT:
+# Both Model A and Model B use exactly the same variants
+# in training and testing.
 
 set.seed(123)
-trainIndex_bio <- createDataPartition(ml_data_bio$labels, p = 0.8, list = FALSE)
-train_bio <- ml_data_bio[trainIndex_bio, ]
-test_bio  <- ml_data_bio[-trainIndex_bio, ]
 
-rf_model_bio <- randomForest(
-  labels ~ ., data = train_bio, ntree = 500, importance = TRUE
+train_index <- createDataPartition(
+  cftr_clean$labels_factor,
+  p = 0.80,
+  list = FALSE
 )
-print(rf_model_bio)
 
-pred_bio <- predict(rf_model_bio, test_bio)
-results_bio <- confusionMatrix(pred_bio, test_bio$labels)
-print(results_bio)
+train_data <- cftr_clean[train_index]
+test_data  <- cftr_clean[-train_index]
 
-saveRDS(rf_model_bio, "results/cftr_rf_model_biological.rds")
-capture.output(results_bio, file = "results/random_forest_results_biological.txt")
+cat("\n================ TRAIN / TEST =================\n")
+cat("Training variants:", nrow(train_data), "\n")
+cat("Testing variants:", nrow(test_data), "\n")
 
-# 5) COMPARE BASELINE vs BIOLOGICAL MODEL
+cat("\nTraining class distribution:\n")
+print(table(train_data$labels_factor))
 
-comparison <- data.frame(
-  Model = c("Baseline (incl. ReviewStatus/NumberSubmitters)",
-            "Biological (Type/Origin/gnomAD/CADD)"),
-  Accuracy    = c(results_baseline$overall["Accuracy"], results_bio$overall["Accuracy"]),
-  Sensitivity = c(results_baseline$byClass["Sensitivity"], results_bio$byClass["Sensitivity"]),
-  Specificity = c(results_baseline$byClass["Specificity"], results_bio$byClass["Specificity"])
+cat("\nTesting class distribution:\n")
+print(table(test_data$labels_factor))
+
+
+# ============================================================
+# MODEL A
+# CURATION-DEPENDENT BASELINE
+# ============================================================
+
+# Model A deliberately includes ClinVar curation metadata.
+#
+# These variables describe aspects of the ClinVar evidence/
+# curation process and therefore make this a curation-dependent
+# baseline rather than a purely variant-level model.
+
+# ------------------------------------------------------------
+# 3. Prepare Model A variables
+# ------------------------------------------------------------
+
+modelA_vars <- c(
+  "labels_factor",
+  "Type",
+  "OriginSimple",
+  "ReviewStatus",
+  "NumberSubmitters"
 )
-print(comparison)
-write.csv(comparison, "results/model_comparison.csv", row.names = FALSE)
 
-# 6) SHAP EXPLAINABILITY — on the biological model
-#    (explains individual predictions, not just global importance)
+modelA_train <- train_data[, ..modelA_vars]
+modelA_test  <- test_data[, ..modelA_vars]
 
-# install.packages("fastshap")
-library(fastshap)
-library(ggplot2)
+# Convert categorical variables to factors
+modelA_train[, Type := as.factor(Type)]
+modelA_test[, Type := factor(Type, levels = levels(modelA_train$Type))]
 
-pred_wrapper <- function(object, newdata) {
-  predict(object, newdata, type = "prob")[, "1"]
+modelA_train[, OriginSimple := as.factor(OriginSimple)]
+modelA_test[, OriginSimple := factor(
+  OriginSimple,
+  levels = levels(modelA_train$OriginSimple)
+)]
+
+modelA_train[, ReviewStatus := as.factor(ReviewStatus)]
+modelA_test[, ReviewStatus := factor(
+  ReviewStatus,
+  levels = levels(modelA_train$ReviewStatus)
+)]
+
+# Replace missing categorical values with explicit level
+for (v in c("Type", "OriginSimple", "ReviewStatus")) {
+  
+  if ("Missing" %in% levels(modelA_train[[v]])) {
+    next
+  }
+  
+  levels(modelA_train[[v]]) <- c(
+    levels(modelA_train[[v]]),
+    "Missing"
+  )
+  
+  modelA_train[is.na(get(v)), (v) := "Missing"]
+  
+  modelA_test[is.na(get(v)), (v) := "Missing"]
 }
 
-shap_values <- explain(
-  rf_model_bio,
-  X = train_bio[, -"labels"],
-  pred_wrapper = pred_wrapper,
-  nsim = 50
+# Make sure NumberSubmitters is numeric
+modelA_train[, NumberSubmitters := as.numeric(NumberSubmitters)]
+modelA_test[, NumberSubmitters := as.numeric(NumberSubmitters)]
+
+# Replace missing numeric values with training median
+median_submitters <- median(
+  modelA_train$NumberSubmitters,
+  na.rm = TRUE
 )
 
-shap_plot <- autoplot(shap_values, type = "importance")
-ggsave("results/shap_importance_biological_model.png", shap_plot, width = 7, height = 5)
+modelA_train[
+  is.na(NumberSubmitters),
+  NumberSubmitters := median_submitters
+]
 
-saveRDS(shap_values, "results/shap_values_biological.rds")
+modelA_test[
+  is.na(NumberSubmitters),
+  NumberSubmitters := median_submitters
+]
 
-cat("\nDone. Key outputs in results/:\n",
-    "- model_comparison.csv          (baseline vs biological accuracy)\n",
-    "- shap_importance_biological_model.png\n",
-    "- random_forest_results_baseline.txt / _biological.txt\n")
+
+# ------------------------------------------------------------
+# 4. Train Model A
+# ------------------------------------------------------------
+
+set.seed(123)
+
+modelA_rf <- randomForest(
+  labels_factor ~ Type +
+    OriginSimple +
+    ReviewStatus +
+    NumberSubmitters,
+  data = modelA_train,
+  ntree = 500,
+  importance = TRUE
+)
+
+cat("\n================ MODEL A =================\n")
+print(modelA_rf)
+
+cat("\nModel A variable importance:\n")
+print(importance(modelA_rf))
+
+
+# ------------------------------------------------------------
+# 5. Evaluate Model A
+# ------------------------------------------------------------
+
+modelA_pred <- predict(
+  modelA_rf,
+  newdata = modelA_test
+)
+
+cat("\nModel A confusion matrix:\n")
+
+cm_A <- confusionMatrix(
+  modelA_pred,
+  modelA_test$labels_factor,
+  positive = "Pathogenic"
+)
+
+print(cm_A)
+
+# ============================================================
+# FIX MODEL A TEST DATA
+# ============================================================
+
+# Rebuild the test data directly from the original train/test
+# split so that factor types match the model exactly.
+
+modelA_test <- test_data[, ..modelA_vars]
+
+# Match factor levels exactly to the training data
+modelA_test[, Type := factor(
+  Type,
+  levels = levels(modelA_train$Type)
+)]
+
+modelA_test[, OriginSimple := factor(
+  OriginSimple,
+  levels = levels(modelA_train$OriginSimple)
+)]
+
+modelA_test[, ReviewStatus := factor(
+  ReviewStatus,
+  levels = levels(modelA_train$ReviewStatus)
+)]
+
+# NumberSubmitters must be numeric
+modelA_test[, NumberSubmitters := as.numeric(NumberSubmitters)]
+
+# Replace missing values using the training median
+modelA_test[
+  is.na(NumberSubmitters),
+  NumberSubmitters := median_submitters
+]
+
+# Predict Model A
+modelA_pred <- predict(
+  modelA_rf,
+  newdata = modelA_test
+)
+
+# Evaluate
+cat("\n================ MODEL A TEST RESULTS =================\n")
+
+cm_A <- confusionMatrix(
+  modelA_pred,
+  modelA_test$labels_factor,
+  positive = "Pathogenic"
+)
+
+print(cm_A)
+
+cat("\nKey metrics:\n")
+cat("Accuracy:",
+    round(cm_A$overall["Accuracy"], 4), "\n")
+
+cat("Kappa:",
+    round(cm_A$overall["Kappa"], 4), "\n")
+
+cat("Pathogenic sensitivity:",
+    round(cm_A$byClass["Sensitivity"], 4), "\n")
+
+cat("Pathogenic specificity:",
+    round(cm_A$byClass["Specificity"], 4), "\n")
+
+cat("Balanced accuracy:",
+    round(cm_A$byClass["Balanced Accuracy"], 4), "\n")
+
+
+# ============================================================
+# MODEL B
+# REDUCED-CIRCULARITY VARIANT-LEVEL MODEL
+# ============================================================
+
+# IMPORTANT:
+# We DO NOT filter out "other" variants.
+#
+# The previous parser caused severe selection bias because
+# many benign variants were classified as "other".
+#
+# Instead, every one of the original 2,800 variants remains
+# in the dataset.
+
+
+# ------------------------------------------------------------
+# 6. Create broader consequence categories
+# ------------------------------------------------------------
+
+# Work from the HGVS/name field already used in your project.
+#
+# The rules are deliberately broad.
+# Unrecognized variants remain "other" rather than being removed.
+
+cftr_clean[, consequence := "other"]
+
+# Frameshift
+cftr_clean[
+  grepl("fs", Name, ignore.case = TRUE),
+  consequence := "frameshift"
+]
+
+# Nonsense / stop-gain
+cftr_clean[
+  grepl("Ter|\\*", Name, ignore.case = TRUE),
+  consequence := "nonsense"
+]
+
+# Splice-site variants
+cftr_clean[
+  grepl(
+    "\\+[1-9][0-9]*[A-Z]>|-[1-9][0-9]*[A-Z]>",
+    Name,
+    ignore.case = TRUE
+  ),
+  consequence := "splice_site"
+]
+
+# Deletions
+cftr_clean[
+  grepl("del", Name, ignore.case = TRUE),
+  consequence := "deletion"
+]
+
+# Duplications
+cftr_clean[
+  grepl("dup", Name, ignore.case = TRUE),
+  consequence := "duplication"
+]
+
+# Insertions
+cftr_clean[
+  grepl("ins", Name, ignore.case = TRUE),
+  consequence := "insertion"
+]
+
+# Missense
+cftr_clean[
+  grepl(
+    "[A-Z][a-z]{2}[0-9]+[A-Z][a-z]{2}",
+    Name
+  ),
+  consequence := "missense"
+]
+
+# Synonymous variants
+cftr_clean[
+  grepl("=", Name),
+  consequence := "synonymous"
+]
+
+# ------------------------------------------------------------
+# 7. Inspect consequence distribution
+# ------------------------------------------------------------
+
+cat("\n================ CONSEQUENCE DISTRIBUTION =================\n")
+
+print(table(cftr_clean$consequence))
+
+cat("\nConsequence by clinical class:\n")
+
+print(
+  table(
+    cftr_clean$labels_factor,
+    cftr_clean$consequence
+  )
+)
+
+cat("\nProportions within each clinical class:\n")
+
+print(
+  round(
+    prop.table(
+      table(
+        cftr_clean$labels_factor,
+        cftr_clean$consequence
+      ),
+      margin = 1
+    ),
+    3
+  )
+)
+
+
+# ============================================================
+# MODEL B TRAINING
+# ============================================================
+
+# ------------------------------------------------------------
+# 8. Recreate train/test data after adding consequence
+# ------------------------------------------------------------
+
+# The original train_index is retained, so Model A and Model B
+# use exactly the same train/test variants.
+
+train_data_B <- cftr_clean[train_index]
+test_data_B  <- cftr_clean[-train_index]
+
+train_data_B[, consequence := as.factor(consequence)]
+
+test_data_B[, consequence := factor(
+  consequence,
+  levels = levels(train_data_B$consequence)
+)]
+
+
+# ------------------------------------------------------------
+# 9. Add basic variant-level information
+# ------------------------------------------------------------
+
+# Type is a variant-level attribute rather than a ClinVar
+# curation-confidence variable.
+
+train_data_B[, Type := as.factor(Type)]
+
+test_data_B[, Type := factor(
+  Type,
+  levels = levels(train_data_B$Type)
+)]
+
+# Remove unused factor levels
+train_data_B[, consequence := droplevels(consequence)]
+test_data_B[, consequence := factor(
+  consequence,
+  levels = levels(train_data_B$consequence)
+)]
+
+
+# ------------------------------------------------------------
+# 10. Train Model B
+# ------------------------------------------------------------
+
+set.seed(123)
+
+modelB_rf <- randomForest(
+  labels_factor ~ Type + consequence,
+  data = train_data_B,
+  ntree = 500,
+  importance = TRUE
+)
+
+cat("\n================ MODEL B =================\n")
+print(modelB_rf)
+
+cat("\nModel B variable importance:\n")
+print(importance(modelB_rf))
+
+
+# ------------------------------------------------------------
+# 11. Evaluate Model B
+# ------------------------------------------------------------
+
+modelB_pred <- predict(
+  modelB_rf,
+  newdata = test_data_B
+)
+
+cat("\nModel B confusion matrix:\n")
+
+cm_B <- confusionMatrix(
+  modelB_pred,
+  test_data_B$labels_factor,
+  positive = "Pathogenic"
+)
+
+print(cm_B)
+
+
+# ============================================================
+# 12. DIRECT MODEL COMPARISON
+# ============================================================
+
+cat("\n============================================================\n")
+cat("                MODEL A vs MODEL B\n")
+cat("============================================================\n")
+
+cat("\nModel A:\n")
+cat("Accuracy:", round(cm_A$overall["Accuracy"], 4), "\n")
+cat(
+  "Kappa:",
+  round(cm_A$overall["Kappa"], 4),
+  "\n"
+)
+cat(
+  "Pathogenic sensitivity:",
+  round(cm_A$byClass["Sensitivity"], 4),
+  "\n"
+)
+cat(
+  "Pathogenic specificity:",
+  round(cm_A$byClass["Specificity"], 4),
+  "\n"
+)
+cat(
+  "Balanced accuracy:",
+  round(cm_A$byClass["Balanced Accuracy"], 4),
+  "\n"
+)
+
+cat("\nModel B:\n")
+cat("Accuracy:", round(cm_B$overall["Accuracy"], 4), "\n")
+cat(
+  "Kappa:",
+  round(cm_B$overall["Kappa"], 4),
+  "\n"
+)
+cat(
+  "Pathogenic sensitivity:",
+  round(cm_B$byClass["Sensitivity"], 4),
+  "\n"
+)
+cat(
+  "Pathogenic specificity:",
+  round(cm_B$byClass["Specificity"], 4),
+  "\n"
+)
+cat(
+  "Balanced accuracy:",
+  round(cm_B$byClass["Balanced Accuracy"], 4),
+  "\n"
+)
+
+
+# ============================================================
+# 13. Save important objects
+# ============================================================
+
+results <- list(
+  dataset = cftr_clean,
+  train_index = train_index,
+  modelA = modelA_rf,
+  modelB = modelB_rf,
+  modelA_confusion = cm_A,
+  modelB_confusion = cm_B
+)
+
+saveRDS(
+  results,
+  file = "CFTR_model_results.rds"
+)
+
+cat("\n============================================================\n")
+cat("Analysis complete.\n")
+cat("Results saved to: CFTR_model_results.rds\n")
+cat("============================================================\n")
