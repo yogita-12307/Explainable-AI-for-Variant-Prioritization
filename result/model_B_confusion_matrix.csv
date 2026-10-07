@@ -1,0 +1,5 @@
+"Prediction","Reference","Freq"
+"Benign","Benign",295
+"Pathogenic","Benign",22
+"Benign","Pathogenic",31
+"Pathogenic","Pathogenic",211
